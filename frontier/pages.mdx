@@ -1,0 +1,170 @@
+---
+title: "Pages Reference"
+description: "Every route in the Frontier dashboard — data sources, key components, and file paths"
+---
+
+## Dashboard Layout
+
+**File:** `src/app/dashboard/layout.tsx`
+
+Wraps all `/dashboard/*` pages. Responsibilities:
+
+- Renders the top navigation bar with links to all 5 dashboard pages.
+- Mounts `<CameraProvider>` so `useCameraContext()` is available to every child without each page managing its own WebSocket.
+- Renders `<NotificationDropdown>` (real-time alert bell) and `<ThemeToggle>`.
+- Redirects unauthenticated users to `/` client-side (middleware is the primary guard; this is a fallback).
+
+---
+
+## `/dashboard` — Operations
+
+**File:** `src/app/dashboard/page.tsx`  
+**Data sources:** `GET /api/notifications/stats`, `GET /api/cameras`  
+**Poll interval:** 15 000 ms
+
+The landing page after login. Shows aggregate system health at a glance.
+
+<CardGroup cols={2}>
+  <Card title="Stat cards" icon="chart-bar">
+    Active threats, today's incident count, cameras online, acknowledgement rate, avg response time, avg verification time, avg Gemini latency, avg YOLO confidence, avg inference time, avg FPS, true/false positive counts, confidence std dev.
+  </Card>
+  <Card title="Daily chart" icon="chart-line">
+    Bar chart of incident counts for the last 14 days. Missing days are filled with zero so the chart always covers a full 14-day window.
+  </Card>
+  <Card title="Per-camera table" icon="table">
+    Incident count, avg verification time, and avg confidence broken down by camera. Sourced from `stats.per_camera`.
+  </Card>
+  <Card title="Recent incidents" icon="list">
+    Last 8 incidents from `GET /api/notifications/list?page=1&per_page=8`. Shows camera, time, weapon type, and open/closed status.
+  </Card>
+</CardGroup>
+
+---
+
+## `/dashboard/cameras` — Cameras
+
+**File:** `src/app/dashboard/cameras/page.tsx`  
+**Component:** `src/components/NexusFloorGrid.tsx`  
+**Data source:** `CameraContext` (via `useCameraContext`)
+
+Renders all cameras organized by floor level. Each camera tile reflects live priority state from the WebSocket — red for alerting (`num_priority > 0`), neutral for idle.
+
+---
+
+## `/dashboard/map` — Map
+
+**File:** `src/app/dashboard/map/page.tsx`  
+**Component:** `src/components/ui/LiveMap.tsx`  
+**Data source:** `CameraContext` (via `useCameraContext`)
+
+Displays cameras as positioned markers on a floor plan image. Camera positions are stored as fractional coordinates (`relative_x`, `relative_y`) in Bastion's `cameras` table. The LiveMap component scales these to the rendered image dimensions.
+
+Active cameras pulse to draw operator attention. Adjacent cameras (from the `adjacencies` table, received via the cameras WebSocket) are highlighted in a secondary color.
+
+---
+
+## `/dashboard/sentinel` — Sentinel
+
+**File:** `src/app/dashboard/sentinel/page.tsx`  
+**Components:** `BoundingBoxOverlay`, `WebRTCStream`, `LiveMap`  
+**Hooks:** `useLiveAnalysis`, `useCameraContext`, `useBoundingBoxes`
+
+The primary threat-response view. Operators spend most of their time here during an active incident.
+
+### Layout
+
+- **Left panel:** Grid of live camera feeds. Each feed is a `WebRTCStream` component connecting to the Nexus WHEP endpoint for that camera. `BoundingBoxOverlay` is layered on top, rendering bounding boxes received from `useBoundingBoxes`.
+- **Right panel:** AI analysis panel showing Gemini weapon description, person description, weapon crop image, and suspect crop image from `useLiveAnalysis`. The panel also shows a mini `LiveMap` for spatial context.
+
+### Camera filtering
+
+`NEXT_PUBLIC_CAMERA_IDS` (comma-separated) limits which cameras appear in Sentinel. If unset, all cameras are shown.
+
+```ts
+const ALLOWED_CAMERA_IDS: Set<number> | null = (() => {
+  if (!_rawCamIds.trim()) return null;
+  const ids = _rawCamIds.split(',').map(Number).filter(n => !isNaN(n));
+  return ids.length ? new Set(ids) : null;
+})();
+```
+
+### WHEP URL construction
+
+Camera stream URLs are resolved in `src/lib/cameraConfig.ts` using `getCameraWhepUrl(camera)`, which maps `stream_link` patterns (`rtsp://.../cam01`) to Nexus WHEP endpoints (`http://nexus:8888/cam01/whep`).
+
+### Analysis panel fields
+
+Weapon fields rendered: `type`, `color`, `action`  
+Person fields rendered: `build`, `race`, `gender`, `clothing`
+
+Each field value is a `[value, confidence]` tuple where confidence is `"low"`, `"medium"`, or `"high"`.
+
+<Note>
+  The Sentinel page reads `useLiveAnalysis` once per active camera. When the operator clicks a different camera, `useLiveAnalysis` re-mounts with the new `cameraId` and performs a one-shot REST fetch for the last known analysis before the WebSocket delivers a new message.
+</Note>
+
+---
+
+## `/dashboard/incidents` — Incidents
+
+**File:** `src/app/dashboard/incidents/page.tsx`  
+**Data source:** `GET /api/notifications/list` (paginated)
+
+Paginated incident list. Each row supports:
+- **Acknowledge** — `POST /api/notifications/[id]/acknowledge`
+- **Handle** — `POST /api/notifications/[id]/handle`
+- **Review** — `POST /api/notifications/[id]/review` (marks as true/false positive)
+
+---
+
+## `/incident/[id]` — Mobile Incident Page
+
+**File:** `src/app/incident/[id]/page.tsx`  
+**API route:** `src/app/api/incident/[id]/route.ts`  
+**Auth:** None — fully unauthenticated
+
+This page is linked from SMS alerts sent by Bastion's `NotificationWorker`. Officers open it on their phones without needing to log in.
+
+### Data fetched
+
+`GET /api/incident/{id}` → Bastion `GET /notifications/event/<id_event>`
+
+The Bastion endpoint joins `notifications → cameras → buildings → locations` and returns:
+
+| Field | Type | Description |
+|---|---|---|
+| `id_event` | number | Notification row ID |
+| `timestamp` | string | ISO 8601 UTC |
+| `camera_name` | string \| null | Human-readable camera label |
+| `floor` | number \| null | Floor number |
+| `building_name` | string \| null | Building name |
+| `location_desc` | string \| null | Free-text location description |
+| `weapon_desc` | string \| null | JSON-encoded Gemini weapon analysis |
+| `person_desc` | string \| null | JSON-encoded Gemini person analysis |
+| `weapon_crop` | string \| null | Base64 JPEG of weapon |
+| `person_crop` | string \| null | Base64 JPEG of suspect |
+| `is_handled` | boolean | Whether incident has been closed |
+
+### Page sections
+
+<Steps>
+  <Step title="Red alert banner">
+    Always shown. Includes an "Incident Handled" badge if `is_handled` is true.
+  </Step>
+  <Step title="Location card">
+    Building name, floor, location description, camera name, and detection timestamp displayed as local time (America/New_York) with a relative "X min ago" label.
+  </Step>
+  <Step title="Suspect and weapon images">
+    `person_crop` and `weapon_crop` rendered as `<img>` tags with `data:image/jpeg;base64,` prefix. Each section is omitted if the crop is null.
+  </Step>
+  <Step title="Structured descriptions">
+    Weapon and person descriptions parsed from JSON and rendered as `key: value` lists. Confidence values are present in the raw data but not displayed on the mobile view.
+  </Step>
+  <Step title="Dashboard link">
+    Links to `/dashboard/sentinel` for operators who are also logged in and want to switch to the full dashboard.
+  </Step>
+</Steps>
+
+<Warning>
+  The `/api/incident/[id]` route calls Bastion directly without `bastionFetch` — it does not require or forward a session token. Do not add authentication to this route; doing so will break SMS-linked incident pages for officers without Keycloak accounts.
+</Warning>

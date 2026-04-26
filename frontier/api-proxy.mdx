@@ -1,0 +1,130 @@
+---
+title: "API Proxy Layer"
+description: "bastionFetch helper and the complete Next.js API route → Bastion mapping"
+---
+
+## Why a Proxy Layer?
+
+Bastion requires a Keycloak `Bearer` token on every request. The token lives in the server-side NextAuth session — it is never exposed to the browser. Frontier's Next.js API routes act as an authenticated proxy: the browser calls a `/api/*` route, the route server calls `bastionFetch`, which injects the token and forwards to Bastion.
+
+```
+Browser → /api/notifications/list
+           └─► bastionFetch("/notifications/list")
+                 └─► GET http://bastion:5100/notifications/list
+                       Authorization: Bearer <keycloak_access_token>
+```
+
+---
+
+## `bastionFetch`
+
+**File:** `src/app/api/_lib/bastionFetch.ts`
+
+Server-side helper used by every authenticated API route handler.
+
+```ts
+export async function bastionFetch(
+  path: string,
+  options: RequestInit = {},
+): Promise<Response>
+```
+
+### Behavior
+
+1. Calls `getServerSession(authOptions)` to retrieve the current session.
+2. Returns `401 Unauthorized` if `session.subject` is missing.
+3. Returns `500` if `API_URL` env var is not set.
+4. Forwards the request to `${API_URL}${path}` with `Authorization: Bearer ${session.subject}`.
+5. Streams the upstream response body and status code back to the caller.
+6. Caller-supplied headers in `options.headers` override the defaults (`Content-Type`, `Authorization`).
+
+### Usage pattern
+
+```ts
+// GET route — no body
+export async function GET() {
+  return bastionFetch('/cameras');
+}
+
+// POST route — with body from request
+export async function POST(req: Request) {
+  const body = await req.text();
+  return bastionFetch('/notifications/new', {
+    method: 'POST',
+    body,
+  });
+}
+
+// Dynamic route segment
+export async function POST(
+  _req: Request,
+  { params }: { params: { id: string } }
+) {
+  return bastionFetch(`/notifications/${params.id}/handle`, { method: 'POST' });
+}
+```
+
+<Warning>
+  `bastionFetch` can only be used in **server components and API route handlers** — never in client components. It calls `getServerSession` which requires the Node.js runtime.
+</Warning>
+
+---
+
+## API Route → Bastion Mapping
+
+All routes live under `src/app/api/`.
+
+### Camera routes
+
+| Next.js route | Method | Bastion endpoint | Auth |
+|---|---|---|---|
+| `/api/cameras` | `GET` | `GET /cameras` | Required |
+| `/api/cameras/adjacencies` | `GET` | `GET /cameras/adjacencies` | Required |
+
+### Notification routes
+
+| Next.js route | Method | Bastion endpoint | Auth |
+|---|---|---|---|
+| `/api/notifications` | `GET` | `GET /notifications` | Required |
+| `/api/notifications/list` | `GET` | `GET /notifications/list` | Required |
+| `/api/notifications/stats` | `GET` | `GET /notifications/stats` | Required |
+| `/api/notifications/clear` | `POST` | `POST /notifications/clear` | Required |
+| `/api/notifications/[id]/acknowledge` | `POST` | `POST /notifications/{id}/acknowledge` | Required |
+| `/api/notifications/[id]/handle` | `POST` | `POST /notifications/{id}/handle` | Required |
+| `/api/notifications/[id]/review` | `POST` | `POST /notifications/{id}/review` | Required |
+
+### Incident routes
+
+| Next.js route | Method | Bastion endpoint | Auth |
+|---|---|---|---|
+| `/api/incidents/reset` | `POST` | `POST /incidents/reset` | Required |
+| `/api/incident/[id]` | `GET` | `GET /notifications/event/{id}` | **None** |
+
+<Note>
+  `/api/incident/[id]` does **not** use `bastionFetch`. It calls Bastion's unauthenticated `GET /notifications/event/<id_event>` endpoint directly. This route powers the mobile incident page linked from SMS alerts, which officers open without logging in.
+</Note>
+
+### Other routes
+
+| Next.js route | Method | Description |
+|---|---|---|
+| `/api/live-analysis` | `GET` | Proxies to `GET /notifications/analysis?camera_id={id}` — last Gemini analysis for a camera |
+| `/api/tts` | `POST` | Server-side text-to-speech synthesis; not proxied to Bastion |
+| `/api/auth/[...nextauth]` | `GET/POST` | NextAuth handler — Keycloak OAuth flow |
+
+---
+
+## `lib/api.ts`
+
+**File:** `src/lib/api.ts`
+
+Contains `createAuthFetcher` — a client-side fetch wrapper that accepts an access token and returns a typed fetcher function. Used in contexts where a React component needs to call Bastion indirectly (e.g., initial data load before a WebSocket connects).
+
+```ts
+const fetcher = createAuthFetcher(accessToken);
+const cameras = await fetcher('/cameras');
+```
+
+<Info>
+  Prefer `bastionFetch` (server-side) over `createAuthFetcher` (client-side) wherever possible. `createAuthFetcher` requires the token to be available in the browser, which only happens after the NextAuth session hydrates.
+</Info>

@@ -1,0 +1,227 @@
+---
+title: "Real-Time Data"
+description: "WebSocket hooks, CameraContext, endpoints, and message schemas"
+---
+
+## Overview
+
+Frontier maintains three persistent WebSocket connections to the Bastion WebSocket server (`NEXT_PUBLIC_WS_SERVER_URL`, default `ws://localhost:5101`). All connections require a Keycloak access token passed as a query parameter (`?token=<access_token>`).
+
+All three hooks auto-reconnect on close and clean up on unmount.
+
+<Info>
+  `http://` and `https://` URLs in `NEXT_PUBLIC_WS_SERVER_URL` are automatically converted to `ws://` and `wss://` by each hook before connecting.
+</Info>
+
+---
+
+## CameraContext
+
+**File:** `src/contexts/CameraContext.tsx`
+
+`CameraProvider` wraps the entire dashboard layout (`src/app/dashboard/layout.tsx`) and runs a single `useCameras` instance shared across all dashboard children. Every page and component in the dashboard reads camera state via `useCameraContext()` instead of mounting their own WebSocket.
+
+```tsx
+// Reading camera state in any dashboard component
+import { useCameraContext } from '@/contexts/CameraContext';
+
+const { cameras, activeCameraId } = useCameraContext();
+```
+
+| Value | Type | Description |
+|---|---|---|
+| `cameras` | `Record<string, CameraData>` | Keyed by `"camera{id}"`, e.g. `"camera3"` |
+| `activeCameraId` | `number \| null` | The camera that most recently triggered an alert |
+
+---
+
+## `useCameras`
+
+**File:** `src/hooks/useCameras.ts`  
+**WebSocket endpoint:** `/ws/frontend/cameras?token=<token>`
+
+Provides a live map of all cameras and their current priority state.
+
+### Strategy
+
+<Steps>
+  <Step title="Initial REST fetch">
+    On mount, fetches `GET /api/cameras` to populate the initial camera list.
+  </Step>
+  <Step title="WebSocket subscription">
+    Connects to `/ws/frontend/cameras`. On successful connection, cancels the fallback poll interval.
+  </Step>
+  <Step title="Fallback polling">
+    If the WebSocket is unavailable or closes, resumes polling `GET /api/cameras` every `fallbackPollMs` (default: 5 000 ms) and reconnects the WebSocket after 3 seconds.
+  </Step>
+</Steps>
+
+### Inbound Message Schema
+
+<Accordion title="Priority update message">
+  ```json
+  {
+    "priorities": { "1": 2, "3": 0, "5": 1 },
+    "active_camera_id": 1
+  }
+  ```
+
+  <ResponseField name="priorities" type="object">
+    Map of camera ID (string) → priority level (number). `0` = idle, `> 0` = alerting. Higher values indicate higher threat level.
+  </ResponseField>
+  <ResponseField name="active_camera_id" type="number | null">
+    The camera that most recently triggered an alert. `null` when no camera is active.
+  </ResponseField>
+</Accordion>
+
+<Accordion title="All-Clear message">
+  ```json
+  { "alert_mode": "CLEAR" }
+  ```
+
+  When `alert_mode === "CLEAR"`, `useCameras` sets `num_priority` to `0` on every camera in state.
+</Accordion>
+
+### `CameraData` shape
+
+```ts
+interface CameraData {
+  id_camera: number;
+  num_priority?: number;       // 0 = idle, >0 = alerting
+  num_floor?: number | null;
+  stream_link?: string | null;
+  relative_x: number | null;   // fractional position for LiveMap
+  relative_y: number | null;
+  lens_group_id: number | null;
+  lens_index: number | null;
+  name_camera?: string;
+}
+```
+
+---
+
+## `useBoundingBoxes`
+
+**File:** `src/hooks/useBoundingBoxes.ts`  
+**WebSocket endpoint:** `/ws/frontend/bbox/{cameraId}?token=<token>`
+
+Streams per-camera bounding box coordinates from Sentry's detection output. One instance per rendered camera feed.
+
+### Reconnect behavior
+
+- Reconnects every **5 000 ms** after a close.
+- Bounding boxes are cleared after **120 ms** of receiving an empty `bounding_boxes` array, smoothing over brief frame gaps without flickering.
+
+<Warning>
+  The 120 ms clear delay (`CLEAR_DELAY_MS`) is intentional. Do not reduce it — rapid empty frames from Sentry during low-confidence detections will cause the overlay to flicker.
+</Warning>
+
+### Inbound Message Schema
+
+<Accordion title="Bounding box message">
+  ```json
+  {
+    "camera_id": "3",
+    "bounding_boxes": [
+      {
+        "x": 0.52,
+        "y": 0.44,
+        "width": 0.08,
+        "height": 0.21,
+        "confidence": 0.93,
+        "class": 0,
+        "detection_type": "gun",
+        "label": "gun",
+        "reid_id": -1
+      }
+    ]
+  }
+  ```
+
+  <ResponseField name="camera_id" type="string">
+    The ID of the camera this payload belongs to. Messages where `camera_id` does not match the hook's `cameraId` argument are ignored.
+  </ResponseField>
+  <ResponseField name="bounding_boxes" type="BoundingBox[]">
+    Array of detected objects. Empty array signals no current detections.
+  </ResponseField>
+  <ResponseField name="x" type="number">
+    Horizontal center of the bounding box, normalized 0–1.
+  </ResponseField>
+  <ResponseField name="y" type="number">
+    Vertical center of the bounding box, normalized 0–1.
+  </ResponseField>
+  <ResponseField name="width" type="number">
+    Box width, normalized 0–1.
+  </ResponseField>
+  <ResponseField name="height" type="number">
+    Box height, normalized 0–1.
+  </ResponseField>
+  <ResponseField name="confidence" type="number">
+    YOLO detection confidence, 0–1.
+  </ResponseField>
+  <ResponseField name="detection_type" type="string">
+    `"gun"` or `"person"`.
+  </ResponseField>
+  <ResponseField name="reid_id" type="number">
+    ReID tracking ID. `-1` for gun detections (ReID is person-only).
+  </ResponseField>
+</Accordion>
+
+### Return values
+
+```ts
+const { boundingBoxes, isConnected, error, lastMessage } = useBoundingBoxes(cameraId, token);
+```
+
+---
+
+## `useLiveAnalysis`
+
+**File:** `src/hooks/useLiveAnalysis.ts`  
+**WebSocket endpoint:** `/ws/frontend/analysis/{cameraId}?token=<token>`
+
+Streams Gemini AI analysis results for the active camera. Used exclusively in the Sentinel page to populate the weapon/suspect description panel.
+
+- On mount, performs a one-shot `GET /api/live-analysis?camera_id={id}` to hydrate with the last known analysis before the WebSocket delivers a new one.
+- Reconnects every **1 500 ms** after a close.
+- Sets internal state to `null` when all non-`camera_id` fields are `null` (empty analysis payload).
+
+### Inbound Message Schema
+
+<Accordion title="Analysis message">
+  ```json
+  {
+    "camera_id": "3",
+    "weapon_desc": "{\"type\": [\"handgun\", \"high\"], \"color\": [\"black\", \"medium\"]}",
+    "person_desc": "{\"build\": [\"medium\", \"high\"], \"clothing\": [\"dark jacket\", \"medium\"]}",
+    "weapon_crop": "<base64 JPEG>",
+    "person_crop": "<base64 JPEG>",
+    "timestamp_ms": 1718000000000,
+    "id_event": 42
+  }
+  ```
+
+  <ResponseField name="weapon_desc" type="string | null">
+    JSON-encoded object where each key maps to `[value, confidence]` pairs. Confidence is `"low"`, `"medium"`, or `"high"`.
+  </ResponseField>
+  <ResponseField name="person_desc" type="string | null">
+    Same structure as `weapon_desc`. Standard person keys: `build`, `race`, `gender`, `clothing`.
+  </ResponseField>
+  <ResponseField name="weapon_crop" type="string | null">
+    Base64-encoded JPEG crop of the detected weapon.
+  </ResponseField>
+  <ResponseField name="person_crop" type="string | null">
+    Base64-encoded JPEG crop of the detected person.
+  </ResponseField>
+  <ResponseField name="id_event" type="number | null">
+    Bastion notification row ID. Used to deep-link to the mobile incident page.
+  </ResponseField>
+</Accordion>
+
+### Return values
+
+```ts
+const { analysis, clear } = useLiveAnalysis(cameraId, token);
+// analysis: LiveAnalysisPayload | null
+// clear: () => void  — resets analysis state to null
+```

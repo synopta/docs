@@ -1,0 +1,74 @@
+---
+title: "Frontier Overview"
+description: "Next.js dashboard UI for the Synopta threat-detection platform"
+---
+
+## What is Frontier?
+
+`synopta-frontier` is the operator-facing dashboard for Synopta. It renders live camera feeds, overlays real-time bounding boxes from the YOLO detection pipeline, surfaces threat alerts, and provides incident management. It is a **Next.js 15 / React 19** application running on **port 3000**.
+
+Frontier never talks directly to Kafka or the database. All data access flows through **Bastion** (REST + WebSocket) or **Nexus** (RTSP→HLS/WebRTC relay).
+
+<Info>
+  Frontier is stateless — it holds no persistent data of its own. Session state lives in a signed JWT cookie managed by NextAuth.
+</Info>
+
+## Service Connections
+
+<CardGroup cols={2}>
+  <Card title="Bastion" icon="server" href="/bastion/overview">
+    REST API on port 5100 and WebSocket server on port 5101. Frontier proxies all authenticated REST calls through its own Next.js API routes using `bastionFetch`. Real-time data (camera priorities, bounding boxes, Gemini analysis) arrives over three WebSocket channels.
+  </Card>
+  <Card title="Nexus" icon="video" href="/nexus/overview">
+    MediaMTX RTSP→HLS/WebRTC relay on port 8888. Frontier's `WebRTCStream` component connects directly to Nexus WHEP endpoints to render live camera video in the Sentinel view.
+  </Card>
+  <Card title="Sentry" icon="eye">
+    Sentry does not talk to Frontier directly. Detection events flow Sentry → Kafka → Bastion → Frontier via WebSocket. Frontier receives bounding box coordinates and Gemini analysis results as WebSocket messages.
+  </Card>
+  <Card title="Keycloak" icon="lock">
+    Identity provider for operator authentication. Frontier uses NextAuth with the Keycloak provider. The Keycloak access token is forwarded on every Bastion API call via the `Authorization: Bearer` header.
+  </Card>
+</CardGroup>
+
+## Architecture at a Glance
+
+| Layer | Technology | Key files |
+|---|---|---|
+| Framework | Next.js 15 (App Router) | `src/app/` |
+| Auth | NextAuth + Keycloak (RS256 JWT) | `src/app/api/auth/[...nextauth]/route.ts` |
+| Route protection | NextAuth middleware | `src/middleware.ts` |
+| Server → Bastion | `bastionFetch` helper | `src/app/api/_lib/bastionFetch.ts` |
+| Real-time camera state | `useCameras` (WS + REST fallback) | `src/hooks/useCameras.ts` |
+| Real-time bounding boxes | `useBoundingBoxes` (WS) | `src/hooks/useBoundingBoxes.ts` |
+| Real-time AI analysis | `useLiveAnalysis` (WS) | `src/hooks/useLiveAnalysis.ts` |
+| Camera state distribution | `CameraContext` (React context) | `src/contexts/CameraContext.tsx` |
+| Video playback | `WebRTCStream` (WHEP) | `src/components/ui/WebRTCStream.tsx` |
+| Styling | Tailwind CSS + shadcn/ui | `src/components/ui/` |
+
+## Data Flow Summary
+
+```
+Sentry (YOLO detection)
+  └─► Bastion WebSocket :5101
+        ├─► /ws/frontend/cameras     ← camera priority updates
+        ├─► /ws/frontend/bbox/:id    ← per-camera bounding boxes
+        └─► /ws/frontend/analysis/:id ← Gemini weapon/person descriptions
+
+Nexus MediaMTX :8888
+  └─► WHEP endpoint per camera      ← live H.264 video (WebRTC)
+
+Bastion REST :5100
+  └─► /api/* (Next.js API routes)   ← proxied via bastionFetch
+        └─► notifications, cameras, incidents, stats
+```
+
+## Dashboard Pages
+
+| Route | Page | Purpose |
+|---|---|---|
+| `/dashboard` | Operations | Incident stats, timing metrics, daily chart |
+| `/dashboard/cameras` | Cameras | Floor-based camera grid with priority indicators |
+| `/dashboard/map` | Map | Live spatial map with active camera markers |
+| `/dashboard/sentinel` | Sentinel | Live camera feeds + bounding box overlays + AI analysis panel |
+| `/dashboard/incidents` | Incidents | Paginated incident list with acknowledge/handle/review actions |
+| `/incident/[id]` | Mobile Incident | Unauthenticated mobile view linked from SMS alerts |

@@ -1,0 +1,120 @@
+---
+title: "Environment Variables"
+description: "Complete reference for all Frontier environment variables"
+---
+
+Frontier reads environment variables from `.env.local` (gitignored). A sample is provided in `.env.local.example`.
+
+<Info>
+  Variables prefixed with `NEXT_PUBLIC_` are bundled into the client-side JavaScript. All other variables are server-only and never sent to the browser.
+</Info>
+
+---
+
+## Server-Side Variables
+
+These are available only in API route handlers, server components, and `next.config.*`. Never accessible in the browser.
+
+<ResponseField name="NEXTAUTH_URL" type="string" required>
+  The canonical URL of the Frontier deployment, e.g. `http://localhost:3000`. NextAuth uses this for OAuth redirect URIs. Must match the redirect URI configured in Keycloak.
+</ResponseField>
+
+<ResponseField name="NEXTAUTH_SECRET" type="string" required>
+  Secret used to sign and encrypt the NextAuth JWT session cookie. Generate with `openssl rand -base64 32`. Rotating this invalidates all existing sessions.
+</ResponseField>
+
+<ResponseField name="KEYCLOAK_CLIENT_ID" type="string" required>
+  Keycloak client ID. Development value: `web-local`.
+</ResponseField>
+
+<ResponseField name="KEYCLOAK_CLIENT_SECRET" type="string" required>
+  Keycloak client secret. Obtained from the Keycloak admin console under the client's Credentials tab.
+</ResponseField>
+
+<ResponseField name="KEYCLOAK_ISSUER" type="string" required>
+  Full Keycloak realm URL. Development value: `http://localhost:8080/realms/GeorgiaTech`. Production value: `https://auth.synopta.ai/realms/GeorgiaTech`.
+</ResponseField>
+
+<ResponseField name="API_URL" type="string" required>
+  Base URL of the Bastion REST API used by `bastionFetch`. Development value: `http://localhost:5100`. In Docker Compose: `http://api:5100`.
+</ResponseField>
+
+---
+
+## Client-Side Variables (`NEXT_PUBLIC_*`)
+
+These are embedded into the browser bundle at build time. Changing them requires a rebuild.
+
+<ResponseField name="NEXT_PUBLIC_WS_SERVER_URL" type="string">
+  Base URL of the Bastion WebSocket server. All three hooks (`useCameras`, `useBoundingBoxes`, `useLiveAnalysis`) derive their WebSocket URLs from this. `http://` is automatically converted to `ws://`.
+
+  Default: `ws://localhost:5101`  
+  Docker Compose: `http://websocket:5101`
+</ResponseField>
+
+<ResponseField name="NEXT_PUBLIC_API_TOKEN" type="string">
+  Static fallback token used by `useCameras` before the Keycloak session hydrates on the client. Allows the camera WebSocket to connect immediately on page load without waiting for `useSession()` to return. Leave unset in production if all camera access should require a valid Keycloak session.
+</ResponseField>
+
+<ResponseField name="NEXT_PUBLIC_CAMERA_IDS" type="string">
+  Comma-separated list of camera IDs to display in the Sentinel view. If empty or unset, all cameras returned by Bastion are shown.
+
+  Example: `NEXT_PUBLIC_CAMERA_IDS=1,3,5`
+</ResponseField>
+
+---
+
+## Environment Files
+
+<Tabs>
+  <Tab title="Development (.env.local)">
+    ```bash
+    NEXTAUTH_URL=http://localhost:3000
+    NEXTAUTH_SECRET=<generated>
+
+    KEYCLOAK_CLIENT_ID=web-local
+    KEYCLOAK_CLIENT_SECRET=<from keycloak admin>
+    KEYCLOAK_ISSUER=http://localhost:8080/realms/GeorgiaTech
+
+    API_URL=http://localhost:5100
+
+    NEXT_PUBLIC_WS_SERVER_URL=http://localhost:5101
+    NEXT_PUBLIC_API_TOKEN=<optional static token>
+    NEXT_PUBLIC_CAMERA_IDS=
+    ```
+  </Tab>
+  <Tab title="Docker Compose">
+    ```bash
+    NEXTAUTH_URL=http://localhost:3000
+    NEXTAUTH_SECRET=<generated>
+
+    KEYCLOAK_CLIENT_ID=web-local
+    KEYCLOAK_CLIENT_SECRET=<from keycloak admin>
+    KEYCLOAK_ISSUER=http://keycloak:8080/realms/GeorgiaTech
+
+    API_URL=http://api:5100
+
+    NEXT_PUBLIC_WS_SERVER_URL=http://websocket:5101
+    NEXT_PUBLIC_CAMERA_IDS=
+    ```
+  </Tab>
+  <Tab title="Production">
+    ```bash
+    NEXTAUTH_URL=https://app.synopta.ai
+    NEXTAUTH_SECRET=<generated>
+
+    KEYCLOAK_CLIENT_ID=web
+    KEYCLOAK_CLIENT_SECRET=<from keycloak admin>
+    KEYCLOAK_ISSUER=https://auth.synopta.ai/realms/GeorgiaTech
+
+    API_URL=http://api:5100
+
+    NEXT_PUBLIC_WS_SERVER_URL=https://ws.synopta.ai
+    NEXT_PUBLIC_CAMERA_IDS=
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  `NEXT_PUBLIC_*` variables are baked into the JS bundle at build time. If you change `NEXT_PUBLIC_WS_SERVER_URL` or `NEXT_PUBLIC_CAMERA_IDS`, you must rebuild the Next.js app (`npm run build`) for the change to take effect — a container restart alone is not sufficient.
+</Warning>

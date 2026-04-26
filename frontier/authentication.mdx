@@ -1,0 +1,100 @@
+---
+title: "Authentication"
+description: "NextAuth + Keycloak JWT flow, route protection, and Bastion token forwarding"
+---
+
+## Overview
+
+Frontier uses **NextAuth.js** with the **Keycloak provider**. Operators sign in via Keycloak (realm: `GeorgiaTech`, client: `web-local`). The resulting Keycloak access token is stored in a signed JWT session cookie and forwarded as a `Bearer` token on every Bastion API call.
+
+<Info>
+  Session strategy is `jwt` with a 24-hour max age. No database adapter is used — the session is entirely cookie-based.
+</Info>
+
+## Auth Flow
+
+<Steps>
+  <Step title="Operator visits a protected route">
+    NextAuth middleware (`src/middleware.ts`) intercepts the request. If no valid session token exists, the user is redirected to `/` (the sign-in page).
+  </Step>
+  <Step title="Keycloak login">
+    NextAuth redirects to the Keycloak authorization endpoint configured via `KEYCLOAK_ISSUER`. The operator authenticates with their Keycloak credentials.
+  </Step>
+  <Step title="Token stored in session">
+    The `jwt` callback stores `account.access_token` on the NextAuth JWT. The `session` callback exposes it as `session.subject` and `session.accessToken`.
+
+    ```ts src/app/api/auth/[...nextauth]/route.ts
+    async jwt({ token, account }) {
+      if (account) {
+        token.access_token = account.access_token;
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      session.subject = token.access_token;
+      session.accessToken = token.access_token;
+      return session;
+    }
+    ```
+  </Step>
+  <Step title="Authenticated requests to Bastion">
+    Every server-side API route calls `bastionFetch`, which retrieves the session and injects the Keycloak access token as `Authorization: Bearer <token>`. See [API Proxy Layer](/frontier/api-proxy) for details.
+  </Step>
+  <Step title="Sign-out">
+    On sign-out, NextAuth fires the `signOut` event which calls the Keycloak logout endpoint (`/protocol/openid-connect/logout`) with the `id_token_hint` and redirects back to `NEXTAUTH_URL` afterward.
+  </Step>
+</Steps>
+
+## Protected Routes
+
+Middleware is applied via `src/middleware.ts` using `withAuth` from `next-auth/middleware`.
+
+```ts src/middleware.ts
+export const config = {
+  matcher: ["/dashboard/:path*", "/profile", "/admin/:path*", "/test/:path*"]
+};
+```
+
+<Warning>
+  The `/test/*` routes are additionally restricted to `localhost` only. Requests from any other hostname are redirected to `/error` even if the user has a valid session.
+</Warning>
+
+The sign-in page is `/` (root). Unauthenticated users are always redirected there, never to a `/login` path.
+
+## Client-Side Token Access
+
+Components that need the token for WebSocket connections read it from the NextAuth session:
+
+```ts
+import { useSession } from 'next-auth/react';
+
+const { data: session } = useSession();
+const token = (session?.user as { accessToken?: string })?.accessToken ?? '';
+```
+
+`useCameras` falls back to `process.env.NEXT_PUBLIC_API_TOKEN` when the session hasn't loaded yet, so the WebSocket connects immediately on page load without waiting for the Keycloak session to hydrate.
+
+## Keycloak Provider Configuration
+
+| Parameter | Env var | Description |
+|---|---|---|
+| `clientId` | `KEYCLOAK_CLIENT_ID` | Keycloak client ID (`web-local` in dev) |
+| `clientSecret` | `KEYCLOAK_CLIENT_SECRET` | Client secret from Keycloak |
+| `issuer` | `KEYCLOAK_ISSUER` | Full realm URL, e.g. `https://auth.synopta.ai/realms/GeorgiaTech` |
+
+<Note>
+  Bastion validates the token using RS256 against `publickey.pem`. Frontier does not validate the token itself — it only stores and forwards it. In `EXEC_MODE=development`, Bastion skips signature verification.
+</Note>
+
+## Type Augmentation
+
+`src/types/next-auth.d.ts` extends the NextAuth `Session` type to expose `subject` and `accessToken` without TypeScript errors:
+
+```ts src/types/next-auth.d.ts
+declare module 'next-auth' {
+  interface Session {
+    subject?: string;
+    accessToken?: string;
+  }
+}
+```
