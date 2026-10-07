@@ -22,7 +22,9 @@
           },
           {
             "group": "Pipeline",
-            "pages": []
+            "pages": [
+              "sentry/detection-workflow"
+            ]
           },
           {
             "group": "Operations",

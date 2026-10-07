@@ -1,0 +1,249 @@
+---
+title: "Detection Workflow"
+description: "End-to-end path from RTSP frame to verified incident, status push, and SMS/email alert"
+icon: "route"
+---
+
+## Overview
+
+Sentry is the real-time weapon detection engine. It runs YOLO inference on RTSP camera streams, verifies gun detections via Gemini AI, and pushes live state to the frontend through Bastion's WebSocket bridge.
+
+---
+
+## Startup Sequence
+
+```text
+python sentry.py
+  -> runner.main()
+        - Discover cameras from Bastion REST API
+        - [shared_pool] spawn inference workers and await readiness
+        - Start verification/status/notification workers
+        - Spawn one lightweight capture process per camera
+```
+
+In shared-pool mode, model-owning workers become ready before capture starts. `per_camera` mode retains the previous model-owning camera process layout. If `KAFKA_BROKER` is not set, Kafka workers are skipped and bbox-only mode remains available.
+
+---
+
+## Camera Capture and Inference
+
+Shared mode gives each camera a capacity-one multiprocessing mailbox. Capture replaces stale frames, while cameras are statically assigned to inference workers and polled round-robin. Each inference worker owns one model pair and independent tracker, identity, recent-gun, FPS, and sequence state for every assigned camera.
+
+```text
+run_camera_capture() -- FramePacket --> run_inference_worker()
+  - StreamProcessor                     - load models in child
+                                         - DetectionHandler.process_frame()
+        - Run person model
+        - Update camera-isolated ByteTrack
+        - Run gun model on person crops
+        - Score gun/person spatial association
+              - IoU overlap
+              - Containment (person bbox contains gun)
+              - Proximity (center distance normalized)
+        - Person with highest score -> detection_type = "target"
+        - Send bboxes to WS bridge  ->  POST /bounding_boxes
+        - If guns present -> publish FrameDetection to sentry.detections
+```
+
+The original `captured_at_ms` and capture sequence travel in `FramePacket` and are forwarded unchanged in bbox updates. Kafka incident timestamps remain publish-time.
+
+---
+
+## Kafka Topics
+
+| Topic | Producer | Consumer | Contents |
+| --- | --- | --- | --- |
+| `sentry.detections` | `DetectionHandler` (per-frame) | `VerificationWorker` | Per-frame gun detections with bbox data and base64 crops |
+| `sentry.incidents` | `VerificationWorker` | `StatusWorker`, `NotificationWorker` | Incident lifecycle events (INVESTIGATING -> VERIFIED/UNSURE/CLOSED) |
+| `sentry.metrics` | per-camera capture/inference loop | `tools/sentry_monitor.py` (debug TUI) | Per-camera FPS heartbeats |
+
+See [Kafka in Sentry](/sentry/kafka) for how the broker is run and what happens when it's down.
+
+---
+
+## Verification Worker
+
+`workers/verification.py` runs as a daemon thread inside the main sentry process.
+
+```text
+VerificationWorker.run()
+  - consumer_loop(sentry.detections)
+        - _process(frame_detection)
+              - Skip if message is stale (> STALE_DETECTION_S = 60s)
+                    Prevents phantom incidents on Kafka restart/replay
+              - Skip if no guns in frame
+              - Create new Incident if none open for this camera
+                    - Publish INVESTIGATING to sentry.incidents
+              - Update best crop if this frame has higher confidence
+              - Increment detection_count / last_detection_ms
+              - If detection_count >= MIN_VERIFICATION_FRAMES
+                  within VERIFICATION_WINDOW_S
+                    - _verify(incident)  [background thread]
+```
+
+### Verification (\_verify)
+
+```text
+_verify(incident)
+  - Send best gun crop -> Gemini (_GUN_PROMPT)
+  - Parse JSON response: {type, color, action} with confidence levels
+
+  - [REJECTED] type == -1/unknown OR confidence < medium
+        - Publish UNSURE -> sentry.incidents
+
+  - [CONFIRMED] type is specific AND confidence is medium/high
+        - Create DB notification  ->  POST /notifications/new (Bastion)
+        - Publish VERIFIED -> sentry.incidents
+        - Send best target crop -> Gemini (_PERSON_PROMPT)
+              - Parse: {build, race, gender, clothing}
+        - Push live analysis to frontend
+              - POST /analysis (WS bridge)
+```
+
+### Expiry Loop
+
+A background thread checks every 5 seconds for incidents that have received no new detections for `INCIDENT_EXPIRE_S` (default 15s). These are closed with status `CLOSED` and published to `sentry.incidents`.
+
+---
+
+## Status Worker
+
+`workers/status.py` runs as a daemon thread inside the main sentry process.
+
+```text
+StatusWorker.run()
+  - consumer_loop(sentry.incidents)
+        - _process(incident)
+              - INVESTIGATING -> no-op (no premature red dots)
+              - VERIFIED      -> add camera to verified set, clear HELD
+              - UNSURE/CLOSED -> remove from verified set
+                                  if last active camera -> HELD state
+              - _push_priorities()  [on any state change]
+```
+
+### Alert State Machine
+
+```text
+CLEAR  --(VERIFIED arrives)-->          ACTIVE (red camera)
+ACTIVE --(same cam VERIFIED)-->         ACTIVE (no change)
+ACTIVE --(different VERIFIED)-->        ACTIVE (new red cam replaces/joins)
+ACTIVE --(all cams close)-->            HELD (last red cam stays yellow)
+HELD   --(new VERIFIED arrives)-->      ACTIVE
+HELD stays until a new verification -- never auto-clears
+```
+
+### Priority Map
+
+| State | Priority Value | Map Dot |
+| --- | --- | --- |
+| Verified / Held | 2 | Red |
+| Adjacent to red | 1 | Yellow |
+| No threat | 0 | Green |
+
+Adjacency data comes from the bundled `sentry-camera-data.json` snapshot and is cached for the worker's lifetime.
+
+The priority map is POSTed to the Bastion WS bridge at `POST /camera_status`, which fans it out in real-time to all connected browser clients via the `/ws/frontend/cameras` WebSocket.
+
+---
+
+## Notification Worker
+
+`workers/notification.py` runs as a daemon thread inside the main sentry process, consuming the same `sentry.incidents` topic as `StatusWorker`.
+
+```text
+NotificationWorker.run()
+  - consumer_loop(sentry.incidents)
+        - _process(incident)
+              - Ignore anything that isn't status == "verified"
+              - Skip if incident_id already notified (de-duped in-memory)
+              - _dispatch(camera_id, timestamp_ms)
+                    - Build incident_data from the bundled camera snapshot
+                          (location only -- weapon/person descriptions aren't
+                          ready yet at this point in the pipeline)
+                    - Load notify/recipients.json
+                    - notify.sms.send_all()    (Twilio)
+                    - notify.email.send_all()  (SMTP, with inline crop images)
+```
+
+<Note>
+  The notified-incident set is cleared by `reset_notification_worker()`, which the HTTP reset server calls on an operator "All Clear" -- this re-arms notifications for any camera that verifies a weapon again.
+</Note>
+
+All SMS/email failures are caught and logged; a Twilio or SMTP outage never blocks detection, verification, or the WebSocket bridge. See [Notifications](/sentry/notifications) for message content and config.
+
+---
+
+## Hourly Report
+
+`workers/hourly_report.py` is a standalone script, not a thread in the main `sentry.py` process -- a systemd timer (or cron) invokes it once an hour so report delivery doesn't depend on the long-running Kafka workers staying healthy.
+
+It polls Bastion's hourly summary endpoint, builds a compact SMS-safe digest (Gemini routes/rejections/errors, confirmed detections, average latency/FPS), and sends it with `notify.sms.send_all`.
+
+<Warning>
+  `HOURLY_REPORT_RECIPIENTS` (comma-separated E.164 numbers) is separate from `notify/recipients.json` -- the hourly ops digest and the per-incident emergency alert go to potentially different audiences by design.
+</Warning>
+
+It can be run by hand in a dry-run mode that prints the report body without sending SMS.
+
+---
+
+## Data Flow Diagram
+
+```text
+RTSP Cameras
+     |
+     v
+StreamProcessor (per camera OS process)
+     |  frames
+     v
+DetectionHandler
+     |---- bboxes -------> POST /bounding_boxes --> WS bridge --> Browser (BoundingBoxOverlay)
+     '---- FrameDetection --> sentry.detections (Kafka)
+                                      |
+                                      v
+                             VerificationWorker
+                                      |
+                     +----------------+----------------+
+                     |                |                |
+                   UNSURE        VERIFIED           CLOSED
+                     |                |
+                     |    +-----------+
+                     |    | Gemini gun + person analysis
+                     |    | POST /notifications/new (DB)
+                     |    | POST /analysis (WS bridge) --> Browser (useLiveAnalysis)
+                     |    |
+                     +----+--> sentry.incidents (Kafka)
+                                      |
+                       +--------------+--------------+
+                       v                              v
+                 StatusWorker                  NotificationWorker
+                       |                         (on VERIFIED only)
+               CLEAR/ACTIVE/HELD                       |
+                       |                    +----------+----------+
+               POST /camera_status           v                     v
+                       |              notify.sms (Twilio)  notify.email (SMTP)
+                 WS bridge --> Browser (useCameras -> map dots)
+```
+
+`workers/hourly_report.py` sits outside this diagram entirely -- it's a separate systemd-timer process that polls Bastion's hourly-summary endpoint once an hour and texts a digest; it never touches Kafka.
+
+---
+
+## Key Config Values
+
+See [Configuration](/sentry/configuration) for the full reference. The values that most directly shape this workflow:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CONFIDENCE_THRESHOLD` | `0.72` | Minimum YOLO gun detection confidence |
+| `PERSON_CONFIDENCE_THRESHOLD` | `0.40` | Minimum YOLO person confidence |
+| `MIN_VERIFICATION_FRAMES` | `5` | Frames required before Gemini verification (first incident) |
+| `MIN_VERIFICATION_FRAMES_POST_THREAT` | `2` | Lower frame bar once a track is already flagged as a threat |
+| `VERIFICATION_WINDOW_S` | `10.0` | Time window those frames must arrive in |
+| `INCIDENT_EXPIRE_S` | `15.0` | Idle time before open incident is auto-closed |
+| `STALE_DETECTION_S` | `60.0` | Max message age accepted from Kafka on replay |
+| `GEMINI_BYPASS_WEAPON_VERIFY` | `1` (on) | Skips the Gemini weapon-image check entirely -- set to `0` for real verification |
+
+<Warning>
+  `GEMINI_BYPASS_WEAPON_VERIFY` defaults to on (`1`). With the bypass active, any candidate that reaches verification is treated as confirmed without actually calling Gemini's weapon check -- set it to `0` to get real AI verification.
+</Warning>
