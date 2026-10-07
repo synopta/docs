@@ -11,6 +11,30 @@
   "navigation": {
     "tabs": [
       {
+        "tab": "Sentry",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "sentry/overview",
+              "sentry/installation"
+            ]
+          },
+          {
+            "group": "Pipeline",
+            "pages": []
+          },
+          {
+            "group": "Operations",
+            "pages": []
+          },
+          {
+            "group": "Training",
+            "pages": []
+          }
+        ]
+      },
+      {
         "tab": "Guides",
         "groups": [
           {

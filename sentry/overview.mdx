@@ -1,0 +1,75 @@
+---
+title: "Overview"
+description: "What Sentry is and how it fits into the Synopta platform"
+icon: "video"
+---
+
+## What is Sentry
+
+Sentry is Synopta's real-time weapon-detection engine. It streams RTSP camera video, runs dual YOLO models (person + gun) on each frame, tracks people across frames, verifies gun detections with Gemini AI, and pushes live state to the rest of the stack through Kafka and Bastion's REST/WebSocket API.
+
+Think of it as the ML core in the pipeline:
+
+```
+cameras → Sentry (this service) → Kafka / Bastion API → Frontier (dashboard UI)
+```
+
+<Info>
+  Sentry has no UI of its own and serves no HTTP routes for browsers. Every user-facing effect — bounding boxes, map colors, SMS/email alerts — happens by Sentry calling out to Bastion or publishing to Kafka.
+</Info>
+
+## Process architecture
+
+```
+sentry.py  (main process)
+├── verification/status/notification worker threads
+├── camera-N capture process  (RTSP only; latest-frame mailbox capacity 1)
+└── bounded inference worker pool
+    ├── shared gun + person YOLO models
+    ├── camera-isolated ByteTrack + CameraIdentityStore
+    └── DetectionHandler → bboxes + sentry.detections
+```
+
+`SENTRY_INFERENCE_MODE` picks between two process layouts:
+
+| Mode | Layout |
+|---|---|
+| `shared_pool` | A small, bounded pool of inference workers owns the models. Lightweight per-camera capture processes hand off frames through a capacity-one mailbox. This is the current default direction — see [Configuration](/sentry/configuration). |
+| `per_camera` | The original layout: each camera gets its own OS process that owns a full model copy. Kept for rollback. |
+
+See [Detection Workflow](/sentry/detection-workflow) for the full per-frame pipeline and [Kafka in Sentry](/sentry/kafka) for how events move between workers.
+
+## File map
+
+| Path | Purpose |
+|---|---|
+| `sentry.py` | CLI entry point. Loads env, sets OpenCV RTSP options, calls `runner.main()`. |
+| `runner.py` | Orchestration: starts workers, spawns camera capture processes. |
+| `config.py` | Single source of truth for env-derived config and device selection. |
+| `api_calls.py` | Thin HTTP client for Bastion REST + WebSocket bridge calls. |
+| `cameras/` | Camera discovery, RTSP capture (`stream_processor.py`), per-camera process entry point, alternate DeepStream/GStreamer capture path. |
+| `vision/` | `DetectionHandler` (YOLO inference + association), model loading, crop extraction/storage, shadow-mode candidate runner. |
+| `tracking/` | Per-camera ByteTrack identity store and the incident-state watcher. |
+| `kafka_bridge/` | Topic constants and the fire-and-forget producer / consumer-loop helper. |
+| `models/` | Shared dataclasses: `FrameDetection`, `Incident`, `FramePacket`, the capacity-one mailbox. |
+| `notify/` | Twilio SMS, SMTP email, message formatting, the static recipients list. |
+| `workers/` | Daemon threads: verification, status, notification, shared-pool inference, plus the standalone hourly report script. |
+| `tools/` | Operator diagnostics: stream checks, a Kafka-driven TUI monitor, stream recording. |
+| `training/` | Offline dataset build, training, evaluation and shadow-promotion tooling for the gun model — see [Training Pipeline](/sentry/training). |
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/sentry/installation">
+    Prerequisites, environment variables, and running Sentry locally.
+  </Card>
+  <Card title="Detection Workflow" icon="route" href="/sentry/detection-workflow">
+    The end-to-end path from RTSP frame to SMS alert.
+  </Card>
+  <Card title="Kafka in Sentry" icon="diagram-project" href="/sentry/kafka">
+    How the pipeline publishes events, and how to run the broker locally.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/sentry/configuration">
+    Every environment variable Sentry reads, with defaults.
+  </Card>
+</CardGroup>
