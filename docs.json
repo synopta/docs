@@ -11,6 +11,38 @@
   "navigation": {
     "tabs": [
       {
+        "tab": "Sentry",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "sentry/overview",
+              "sentry/installation"
+            ]
+          },
+          {
+            "group": "Pipeline",
+            "pages": [
+              "sentry/detection-workflow",
+              "sentry/kafka"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "sentry/configuration",
+              "sentry/notifications"
+            ]
+          },
+          {
+            "group": "Training",
+            "pages": [
+              "sentry/training"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Guides",
         "groups": [
           {

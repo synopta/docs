@@ -1,0 +1,59 @@
+---
+title: "Notifications"
+description: "SMS and email alerts to officers when a weapon is verified, plus the hourly ops digest"
+icon: "bell"
+---
+
+## Who gets notified, and when
+
+When `workers/verification.py` publishes a `VERIFIED` incident to `sentry.incidents`, `workers/notification.py` (a daemon thread consuming the same topic) dispatches SMS and email to a static list of officers. See [Detection Workflow](/sentry/detection-workflow#notification-worker) for where this sits in the pipeline.
+
+Each incident is only dispatched once: the worker keeps an in-memory set of already-notified incident IDs. An operator "All Clear" action resets that set, re-arming notifications for any camera that verifies a weapon again.
+
+<Note>
+  All SMS/email failures are caught and logged. A Twilio or SMTP outage never blocks detection, verification, or the WebSocket bridge — officers just don't get a text until the credentials or network issue is fixed.
+</Note>
+
+## Recipients list
+
+`notify/recipients.json` is a static, hand-edited list of officers to alert. Each entry can have a phone number, an email address, or both — a recipient with only a phone gets SMS only, and vice versa.
+
+```json notify/recipients.json
+[
+  { "name": "Jane Officer", "phone": "+15555550123", "email": "jane.officer@example.gov" }
+]
+```
+
+This file is not templated or seeded from Bastion — add or remove officers by editing it directly and restarting Sentry.
+
+## Message content
+
+`notify/formatter.py` builds the actual text from the incident data:
+
+- **SMS** — one line, phone-lock-screen friendly: a location, a timestamp, and a link to the unauthenticated mobile incident page in synopta-frontier.
+- **Email** — the same subject line, plus an HTML body with inline weapon/person crop images when they're available.
+
+<Info>
+  At dispatch time, only the camera location is known — the Gemini weapon/person descriptions are filled in moments later and reach the frontend separately via the live-analysis push, not the initial SMS/email.
+</Info>
+
+## Configuration
+
+| Variable | Description |
+| --- | --- |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Twilio SMS credentials. Missing any of these skips SMS and logs a warning, never raises |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | SMTP email credentials. Same fail-soft behavior as Twilio |
+| `FRONTIER_URL` | Must include the scheme (http or https). Used to build the mobile incident link |
+| `notify/recipients.json` | Static list of officers, edited by hand |
+
+## Hourly ops digest
+
+`workers/hourly_report.py` is a standalone script, not a worker thread inside `sentry.py` — a systemd timer or cron job invokes it once an hour, so report delivery doesn't depend on the long-running Kafka workers staying healthy.
+
+It fetches a one-hour summary from Bastion, builds a compact SMS-safe digest covering Gemini routes, rejections, errors, confirmed detections, and average latency/FPS, then texts it to a separate recipient list.
+
+<Warning>
+  `HOURLY_REPORT_RECIPIENTS` (comma-separated E.164 numbers) is a separate list from `notify/recipients.json` — the hourly ops digest and the per-incident emergency alert go to potentially different audiences by design.
+</Warning>
+
+It also supports a dry-run mode that prints the report body without sending any SMS, useful when checking digest content after changing the Bastion summary endpoint.

@@ -1,0 +1,102 @@
+---
+title: "Configuration"
+description: "Every environment variable Sentry reads, grouped by what it controls"
+icon: "sliders"
+---
+
+All configuration is env-derived and loaded through `config.py`, the single source of truth for defaults and device selection. Sentry also loads `.env` via `python-dotenv`, so a local `.env` file in `synopta-sentry/` is enough; nothing needs to be exported manually.
+
+## Connectivity
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `API_URL` | `http://localhost:5100` | Bastion Flask REST API |
+| `WEBSOCKET_URL` | `http://localhost:5101` | Bastion WebSocket bridge |
+| `API_TOKEN` | required | Bearer token for non-camera API writes |
+| `SYNOPTA_CPU_IP` | required | Host exposing the MediaMTX RTSP relay on port 8554 |
+| `NEXUS_API_URL` | unset | Alternate Nexus API URL, read via `config.load_config()` |
+| `KAFKA_BROKER` | unset | Kafka bootstrap address. Leave blank to disable Kafka entirely |
+
+## Model paths and inference mode
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL_PATH` | `best.pt` | Gun detection YOLO weights |
+| `PERSON_MODEL_PATH` | unset | Person detection YOLO weights (optional) |
+| `SENTRY_INFERENCE_MODE` | `per_camera` | `per_camera` (rollback layout, one process per camera) or `shared_pool` (bounded worker pool) |
+| `SENTRY_INFERENCE_WORKERS` | `1` | Shared-pool model-owning worker processes |
+| `SENTRY_INFERENCE_BATCH_SIZE` | `1` | Max distinct-camera frames per person/gun model batch |
+| `SENTRY_INFERENCE_MAX_BATCH_DELAY_MS` | `5` | Max delay while forming a model batch |
+| `SENTRY_INFERENCE_STARTUP_TIMEOUT_S` | `120` | Readiness handshake timeout for shared-pool workers |
+
+<Note>
+  `config.load_config()` validates these at startup: `SENTRY_INFERENCE_MODE` must be `per_camera` or `shared_pool`, and the numeric fields must be positive (workers/batch size at least 1, delay non-negative, timeout greater than zero). An invalid value raises immediately instead of silently falling back.
+</Note>
+
+## Detection thresholds
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CONFIDENCE_THRESHOLD` | `0.72` | Minimum YOLO confidence for gun detections |
+| `PERSON_CONFIDENCE_THRESHOLD` | `0.40` | Minimum YOLO confidence for person detections |
+| `RECENT_GUN_WINDOW_S` | `0.75` | How long after the last gun detection to keep the person model running |
+
+## Gun/person association and track scoring
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ASSOCIATION_PROMOTE_THRESHOLD` | `0.60` | Spatial score required to associate a gun with a person |
+| `ASSOCIATION_MARGIN_THRESHOLD` | `0.10` | Minimum score gap to call a single person the gun's owner unambiguously |
+| `SUSPECT_PROMOTE_SCORE` | `0.60` | Per-track threat score to promote a tracked person to `target` |
+| `THREAT_PRIMARY_INC` | `0.30` | Score increment for the primary gun/person association |
+| `THREAT_SECONDARY_INC` | `0.10` | Score increment for secondary associations |
+| `THREAT_DECAY` | `0.06` | Per-cycle decay applied to a track's threat score |
+| `TARGET_HOLD_S` | `1.50` | How long a `target` label survives after the threat score drops |
+
+## Incident verification
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MIN_VERIFICATION_FRAMES` | `5` | Frames required before Gemini verification (first incident) |
+| `MIN_VERIFICATION_FRAMES_POST_THREAT` | `2` | Lower frame bar once a track is already flagged as a threat |
+| `VERIFICATION_WINDOW_S` | `10.0` | Time window those frames must arrive in |
+| `INCIDENT_EXPIRE_S` | `15.0` | Idle time before an open incident auto-closes |
+| `STALE_DETECTION_S` | `60.0` | Max message age accepted from Kafka on replay |
+| `EXPIRY_POLL_INTERVAL_S` | derived from `INCIDENT_EXPIRE_S` | How often the expiry loop checks for idle incidents |
+
+## Crops and Gemini verification
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | required for AI descriptions | Gemini API key |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model used for verification and descriptions |
+| `GEMINI_BYPASS_WEAPON_VERIFY` | `1` (on) | Skips the Gemini weapon-image check entirely; set to `0` for real verification |
+| `GEMINI_REJECT_COOLDOWN_S` | `120` | After Gemini rejects a candidate, how long to stop re-submitting that camera's repeat false positives |
+| `GEMINI_COOLDOWN_BYPASS_CONFIDENCE` | `0.90` | A substantially stronger local detection bypasses the reject cooldown |
+| `KAFKA_DETECTION_JPEG_QUALITY` | `100` | JPEG quality for crops sent to Gemini/notifications |
+| `DETECTION_CROP_PADDING` | `0.50` | Padding fraction added around detection crops |
+| `DETECTION_CROP_STORE_DIR` | `output/detection_crops` | Disk location for the crop store |
+| `DETECTION_CROP_TTL_S` | `600` | How long stored crops are kept before cleanup |
+| `DETECTION_CROP_CLEANUP_INTERVAL_S` | `30` | How often the crop store sweeps for expired files |
+
+<Warning>
+  `GEMINI_BYPASS_WEAPON_VERIFY` defaults to on. With the bypass active, any candidate that reaches verification is treated as confirmed without Gemini actually checking the weapon image — flip it to `0` before relying on Gemini rejection in a real deployment.
+</Warning>
+
+## ReID (cross-camera tracking)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ENABLE_REID` | `0` | Enable OSNet cross-camera (MCMT) tracking. Requires `torchreid` installed from source |
+| `REID_INTERVAL_S` | `2.0` | Seconds between OSNet runs per track |
+| `REID_SIMILARITY_THRESHOLD` | `0.50` | Cosine similarity threshold for a ReID match |
+
+## Logging and metrics
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `METRICS_LOG_INTERVAL_S` | `60.0` | How often per-camera metrics are logged |
+
+## Notifications
+
+Twilio, SMTP and hourly-report variables are covered on the [Notifications](/sentry/notifications) page, since they're only relevant once a verified incident needs to reach an officer.

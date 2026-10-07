@@ -1,0 +1,101 @@
+---
+title: "Installation & Setup"
+description: "Prerequisites, environment variables, and running Sentry locally"
+icon: "download"
+---
+
+## Prerequisites
+
+- Python 3.10+
+- Docker, for Kafka, the Bastion API, and the WebSocket bridge (see [docker-compose.yml](https://github.com/synopta/synopta) at the repo root)
+- `best.pt` — gun detection YOLO weights, placed in the repo root (distributed out of band, not committed)
+- `yolo11n.pt` — person detection weights. `pip install ultralytics` downloads it automatically on first run, or place it manually
+
+## Install
+
+```bash
+cd synopta-sentry
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+<Note>
+  `torchreid` is only needed when `ENABLE_REID=1`. It isn't on PyPI in a usable form — install it from source:
+
+  ```bash
+  git clone https://github.com/KaiyangZhou/deep-person-reid
+  cd deep-person-reid && pip install -e .
+  ```
+</Note>
+
+## Environment
+
+Create `synopta-sentry/.env`:
+
+```env
+# Bastion REST API + WebSocket bridge
+API_URL="http://localhost:5100"
+WEBSOCKET_URL="http://localhost:5101"
+API_TOKEN="<bearer token>"
+
+# CPU host running the MediaMTX RTSP relay (synopta-nexus)
+SYNOPTA_CPU_IP="<nexus host ip>"
+
+# Model weights
+MODEL_PATH="./best.pt"
+PERSON_MODEL_PATH="./yolo11n.pt"
+
+# Event stream — leave blank to disable Kafka entirely
+KAFKA_BROKER="localhost:9092"
+
+# Gemini AI verification
+GEMINI_API_KEY="<your key>"
+GEMINI_MODEL="gemini-2.0-flash"
+
+# Detection thresholds
+CONFIDENCE_THRESHOLD=0.72
+ENABLE_REID=1
+```
+
+See [Configuration](/sentry/configuration) for the full list of variables Sentry reads, and [Notifications](/sentry/notifications) for the Twilio/SMTP variables.
+
+<Warning>
+  `GEMINI_BYPASS_WEAPON_VERIFY` defaults to **on**. Any candidate that reaches verification is treated as confirmed without Gemini actually checking the weapon image. Set it to `0` before relying on Gemini rejection in a real deployment.
+</Warning>
+
+## Run
+
+```bash
+# Start the shared Docker stack first (Kafka, Bastion, WebSocket bridge)
+docker compose up -d   # from the repo root
+
+# Then start Sentry
+cd synopta-sentry
+source .venv/bin/activate
+python sentry.py
+```
+
+That's it — one command. The verification, status, and notification worker threads, plus the analysis workers, all start inside the same process automatically.
+
+## Create the Kafka topics (first run only)
+
+```bash
+docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --create \
+  --topic gun_analysis --partitions 1 --replication-factor 1 --if-not-exists
+
+docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --create \
+  --topic person_analysis --partitions 1 --replication-factor 1 --if-not-exists
+```
+
+## Detection label contract
+
+Labels sent to the frontend via the WebSocket bridge:
+
+| `label` | `detection_type` | Box colour | Meaning |
+|---|---|---|---|
+| `gun` | `gun` | Red | Weapon detected |
+| `target` | `target` | Red | Person confirmed carrying a gun |
+| `person` | `person` | Grey | Person with no gun association |
