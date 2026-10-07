@@ -29,7 +29,10 @@
           },
           {
             "group": "Operations",
-            "pages": []
+            "pages": [
+              "sentry/configuration",
+              "sentry/notifications"
+            ]
           },
           {
             "group": "Training",

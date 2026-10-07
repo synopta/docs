@@ -1,0 +1,15 @@
+---
+title: "Notifications"
+description: "SMS and email alerts to officers when a weapon is verified, plus the hourly ops digest"
+icon: "bell"
+---
+
+## Who gets notified, and when
+
+When `workers/verification.py` publishes a `VERIFIED` incident to `sentry.incidents`, `workers/notification.py` (a daemon thread consuming the same topic) dispatches SMS and email to a static list of officers. See [Detection Workflow](/sentry/detection-workflow#notification-worker) for where this sits in the pipeline.
+
+Each incident is only dispatched once: the worker keeps an in-memory set of already-notified incident IDs. An operator "All Clear" action resets that set, re-arming notifications for any camera that verifies a weapon again.
+
+<Note>
+  All SMS/email failures are caught and logged. A Twilio or SMTP outage never blocks detection, verification, or the WebSocket bridge — officers just don't get a text until the credentials or network issue is fixed.
+</Note>
