@@ -16,3 +16,49 @@ icon: "graduation-cap"
 - **A bigger GPU makes iteration faster, not the detector better.** A bigger architecture alone won't fix domain shift either. The plan is public CCTV positives, plus reviewed hard negatives, plus controlled own-camera positives later.
 - **Public checkpoints are not assumed better than the current baseline.** Every candidate is compared against it on the same dataset version and the same pipeline.
 - The public CCTV-Gun sources are recorded as `commercial_use: unverified`. A model trained on them is marked not cleared for commercial deployment until someone confirms the licenses; the production gate enforces this.
+
+## How production actually runs the gun model
+
+Training and evaluation replicate these facts from the live code path:
+
+| Step | Code | Value |
+| --- | --- | --- |
+| Frame is downscaled before inference | `cameras/stream_processor.py` | 640px wide, area interpolation |
+| Person model on the downscaled frame | `vision/detection_pipeline.py` | `PERSON_CONFIDENCE_THRESHOLD` (0.40) |
+| Person boxes are padded and cropped from the downscaled frame | `_expand_box_pixels` | 0.25 padding, crops under 8px skipped |
+| Gun model on the crops | `_run_gun_inference` | 640px live inference size |
+| Every returned box counts as a gun, whatever its class | `_parse_gun_result` | so a candidate must have exactly one class, `weapon` |
+| Alert (Gemini candidate) | `workers/verification.py` | at least `MIN_VERIFICATION_FRAMES` (5) within `VERIFICATION_WINDOW_S` (10s); closes after `INCIDENT_EXPIRE_S` (15s) of silence |
+
+The current baseline is YOLOv8n with one class (`weapon`), trained at 1024px. The deployed `.env` uses a lower confidence threshold than the code default, so check the live `.env` before assuming `config.py`'s default applies.
+
+This is why the primary training config fine-tunes a COCO-pretrained YOLO26-N on production-equivalent person crops at 640px rather than full frames at 1280px: a person who is 300px tall in 1080p is only about 100px tall by the time the gun model sees them. Training on sharp full-resolution guns would measure a system that isn't actually running in production.
+
+## Pipeline stages
+
+| Script | Purpose |
+| --- | --- |
+| `schema.py` | Strict JSONL manifest: source, license, split, labels, hash, review status |
+| `ingest.py` | Parses COCO-style and YOLO-style source datasets into the manifest format |
+| `splits.py` | Dedup, near-duplicate grouping, camera/sequence-disjoint splits, a locked test set |
+| `augment.py` | Controlled CCTV degradations: train-only copies and a separate stress test set |
+| `labeling.py` | Internal review queue: Bastion/shadow crops routed to human review, becoming hard negatives |
+| `pipeline.py` | Offline replica of the live person-to-crop-to-gun path |
+| `build_dataset.py` | Manifest to Ultralytics dataset (person crops or full frame) |
+| `train.py` | Config-driven training that produces a registered candidate artifact |
+| `evaluate.py` | Box, image, alert-level, per-camera, and latency metrics |
+| `sweep_thresholds.py` | Threshold/min-frames sweep producing a recommendation file (never applied automatically) |
+| `gates.py` | Stage gates: shadow, canary, production |
+| `artifacts.py` | Registry of weights hash, dataset hash, command, metrics, and status history |
+| `shadow_report.py` | Summarizes live shadow logs into gate evidence |
+
+`vision/shadow.py` is the Sentry-side counterpart: a log-only candidate runner that scores a candidate model against live traffic without affecting detections.
+
+Everything is config-driven (`training/configs/`) and recorded in the manifest or artifact registry — notebooks are for inspecting data and reports only, never for producing data or models directly.
+
+## Where training runs
+
+| Environment | Summary |
+| --- | --- |
+| Runpod | A network volume (300GB+) holds raw data, manifests, built datasets, and the registry — never the pod's container disk. An L40S 48GB is the preferred GPU; a larger GPU speeds iteration but doesn't change model quality. A bootstrap script is idempotent and re-run after every pod restart. Weights & Biases logs config and per-epoch metrics only, never images or weights, since the dataset may hold internal camera imagery. |
+| Georgia Tech PACE (Slurm) | The dataset travels through a Weights & Biases artifact, so nothing is copied to PACE by hand. A submit script on the login node installs pinned dependencies, downloads model weights and the dataset artifact, then submits the training job, which runs ingest, split, build, and train, plus eval and the shadow gate if a baseline model is present. |  |
