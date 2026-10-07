@@ -1,0 +1,18 @@
+---
+title: "Training Pipeline"
+description: "Offline dataset, training, evaluation, and shadow-promotion tooling for the gun model"
+icon: "graduation-cap"
+---
+
+`training/` is offline tooling to improve the gun model safely. It builds a reproducible dataset from public CCTV data and reviewed hard negatives, trains a candidate, evaluates it through the same path production uses, runs it in shadow beside the live model, and promotes only through predefined gates with rollback at every step.
+
+<Info>
+  Nothing in `training/` edits `.env`, `config.py`, or live weights, and nothing here deploys a model. Promotion is a separate, reviewed step.
+</Info>
+
+## What this can and cannot tell you
+
+- **No true-positive incidents from real cameras.** Public-data recall does not tell you recall on our cameras. The production gate needs staged own-camera positives (safely staged, legally handled props, consented participants).
+- **A bigger GPU makes iteration faster, not the detector better.** A bigger architecture alone won't fix domain shift either. The plan is public CCTV positives, plus reviewed hard negatives, plus controlled own-camera positives later.
+- **Public checkpoints are not assumed better than the current baseline.** Every candidate is compared against it on the same dataset version and the same pipeline.
+- The public CCTV-Gun sources are recorded as `commercial_use: unverified`. A model trained on them is marked not cleared for commercial deployment until someone confirms the licenses; the production gate enforces this.
