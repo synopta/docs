@@ -247,3 +247,68 @@ See [Configuration](/sentry/configuration) for the full reference. The values th
 <Warning>
   `GEMINI_BYPASS_WEAPON_VERIFY` defaults to on (`1`). With the bypass active, any candidate that reaches verification is treated as confirmed without actually calling Gemini's weapon check -- set it to `0` to get real AI verification.
 </Warning>
+
+---
+
+## File Structure
+
+<CodeGroup>
+
+```text synopta-sentry/
+sentry.py              CLI entry point
+runner.py              Orchestration: workers + camera processes
+config.py              All config constants and env loading (single source of truth)
+api_calls.py           Bastion REST helpers
+analysis_prev.py       Legacy standalone Gemini analysis worker, superseded by
+                       workers/verification.py; kept for reference only
+
+cameras/
+  discovery.py          Fetch camera list from Bastion
+  actions.py            bbox forwarding + smoothed detection state
+  camera_process.py     OS process entry point per camera (per_camera mode)
+  stream_processor.py   RTSP capture + reconnect loop (cv2.VideoCapture)
+  deepstream_capture.py Alternate GStreamer/DeepStream capture path (Jetson/NVDEC)
+
+vision/
+  detection_pipeline.py  DetectionHandler (YOLO inference + association)
+  yolo_loader.py         YOLO model loading
+  association.py         Gun/person spatial scoring
+  crops.py               Crop extraction helpers
+  crop_store.py          Disk-backed crop persistence for notifications (TTL cleanup)
+  shadow.py              Shadow-mode candidate model runner (see training docs)
+
+tracking/
+  track_store.py     Per-camera ByteTrack identity store (CameraIdentityStore)
+  byte_tracker.py    Thin wrapper around ultralytics' ByteTrack
+  incident_state.py  Watches sentry.incidents to answer "is this camera verified?"
+
+kafka_bridge/
+  topics.py          Topic name constants (sentry.detections/incidents/metrics)
+  producer.py        Fire-and-forget producer + consumer_loop helper
+
+models/
+  incident.py        IncidentStatus enum, FrameDetection, Incident dataclasses
+  frame.py           FramePacket (frame + capture metadata passed between processes)
+  mailbox.py         Capacity-one multiprocessing mailbox (put_latest/get_latest)
+
+notify/
+  sms.py             Twilio SMS sender
+  email.py           SMTP email sender (inline MIME images)
+  formatter.py       Builds SMS/email bodies from incident data
+  recipients.json    Static officer list, edit by hand
+
+workers/
+  verification.py    Incident lifecycle + Gemini verification
+  status.py          Camera priority state machine + WS bridge push
+  notification.py    SMS/email dispatch on VERIFIED
+  inference.py       shared_pool mode: fair scheduler + inference worker loop
+  hourly_report.py   Standalone hourly ops-summary SMS (systemd timer, not a thread)
+
+tools/
+  check_streams.py          Diagnostic: print camera stream URLs
+  sentry_monitor.py         Rich TUI: live FPS + incidents from Kafka
+  download_rtsp_streams.py  Record camera streams to disk for dataset building
+  test_rtsp_open.py         Diagnostic: verify an RTSP URL opens with OpenCV
+```
+
+</CodeGroup>

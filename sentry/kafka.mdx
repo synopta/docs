@@ -1,0 +1,45 @@
+---
+title: "Kafka in Sentry"
+description: "How the detection pipeline publishes to Kafka, and how to bring the broker up locally"
+icon: "diagram-project"
+---
+
+## How Kafka works (conceptually)
+
+- **Kafka** is a distributed event stream: producers send messages to topics; consumers read from topics. Messages are stored and replayed so many consumers can process the same events.
+- In Sentry, the producers and consumers are in-process workers, not external services: the per-camera detection worker publishes to `sentry.detections`, the `VerificationWorker` consumes that topic and publishes `sentry.incidents`, and the `StatusWorker` / `NotificationWorker` consume `sentry.incidents` in turn. A fourth topic, `sentry.metrics`, carries per-camera FPS heartbeats. See [Detection Workflow](/sentry/detection-workflow) for the full pipeline.
+- External consumers (analytics, SIEM, recording) can subscribe to any of these topics and react to detections without touching Sentry or the frontend at all.
+
+So the flow is:
+
+```text
+Sentry (per frame) -> publish event -> Kafka topic
+                                          |
+                      Other services (consumers) read and process
+```
+
+## Why it's helpful here
+
+- **Decoupling**: Alerting, analytics, or recording can be separate processes. They don't need to call Sentry or the WebSocket; they just read from Kafka.
+- **Replay / backfill**: New consumers can read past events (within retention). Good for auditing or reprocessing.
+- **Scale**: Many consumers can read the same stream without Sentry sending to each one.
+
+## Why it's bad without it (when broker is down)
+
+- **No broker**: Sentry is configured with `KAFKA_BROKER=localhost:9092`, but no Kafka is running. The client keeps trying to connect and fails (connection refused).
+- **Per-process producers**: in `per_camera` mode Sentry runs one process per camera, each with its own Kafka producer that retries in the background, so you get a lot of connection errors and "Cannot publish, not connected to Kafka" logs. `shared_pool` mode has fewer producers (one per inference worker) but the same failure mode.
+- **Effect**: bounding boxes still reach the frontend via the WebSocket bridge, but the whole Kafka-dependent chain (verification, incidents, notifications/status) never fires, since that chain is the Kafka consumers.
+
+## How to make Kafka work
+
+The stack uses the Apache Kafka Docker image, not Bitnami, in single-node KRaft mode.
+
+1. **Start the stack (including Kafka)** from the repo root, where the compose file lives, with `docker compose up -d`. The `kafka` service is in the same compose file; it listens on port 9092 and uses KRaft (no Zookeeper).
+2. **Point Sentry at the broker** by setting `KAFKA_BROKER=localhost:9092` in `synopta-sentry/.env`. Sentry runs on your machine, so it connects to Kafka via `localhost:9092` (the compose file exposes 9092 and advertises `localhost:9092` for host clients).
+3. **Run Sentry** with `python sentry.py` from an activated virtualenv in `synopta-sentry/`. You should see a log line like "Connected to Kafka broker at localhost:9092". Per-frame gun detections publish to `sentry.detections`.
+
+Create the `gun_analysis` and `person_analysis` topics before the first run — see [Installation](/sentry/installation) for the exact commands.
+
+<Note>
+  To disable Kafka (no broker, no connection attempts), leave `KAFKA_BROKER` unset or set it to empty in `.env`. Sentry falls back to a no-op producer — bounding boxes still reach the frontend via WebSocket, but incident verification, SMS/email notifications, and camera-priority status updates all depend on Kafka and will not run.
+</Note>

@@ -23,7 +23,8 @@
           {
             "group": "Pipeline",
             "pages": [
-              "sentry/detection-workflow"
+              "sentry/detection-workflow",
+              "sentry/kafka"
             ]
           },
           {
