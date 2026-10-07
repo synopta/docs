@@ -62,3 +62,22 @@ Everything is config-driven (`training/configs/`) and recorded in the manifest o
 | --- | --- |
 | Runpod | A network volume (300GB+) holds raw data, manifests, built datasets, and the registry — never the pod's container disk. An L40S 48GB is the preferred GPU; a larger GPU speeds iteration but doesn't change model quality. A bootstrap script is idempotent and re-run after every pod restart. Weights & Biases logs config and per-epoch metrics only, never images or weights, since the dataset may hold internal camera imagery. |
 | Georgia Tech PACE (Slurm) | The dataset travels through a Weights & Biases artifact, so nothing is copied to PACE by hand. A submit script on the login node installs pinned dependencies, downloads model weights and the dataset artifact, then submits the training job, which runs ingest, split, build, and train, plus eval and the shadow gate if a baseline model is present. |  |
+
+Both paths produce the same thing: a registered candidate artifact with its weights hash, dataset hash, metrics, and status history, ready to be compared against the baseline through the same evaluation path.
+
+## Metrics in the evaluation report
+
+- **box** — precision/recall/F1 at a fixed IoU and threshold, plus AP50 over all confidences, computed on the full frame after the two-stage pipeline (not a raw Ultralytics val on crops).
+- **image** — whether a frame is flagged at all, plus the false-positive rate on weapon-free frames.
+- **alert** — the verification rule replayed per camera sequence: event recall, alert precision, and false alerts per camera-hour, overall and per camera.
+- **person_stage_coverage** — the share of ground-truth weapons the person stage hands to the gun model at all. This is a ceiling that no gun-model retraining can raise.
+- **latency_ms** — p50/p95 for person, gun, and total per frame, meaningful only on the target GPU.
+- **per_camera** — per-camera box, image, and latency metrics.
+
+<Warning>
+  False alerts per camera-hour only means something on continuous, reviewed, weapon-free footage from real cameras. Sparse public frames and crops don't count as footage, and reports warn when there are fewer than 24 hours of it.
+</Warning>
+
+## Privacy and review
+
+Internal hard negatives come from a labelling queue fed by Gemini-rejected detections and shadow-mode disagreement crops. Reviewers classify each one (no weapon, weapon, unsure, discard); only their decision becomes a label — the original Gemini verdict and officer flags are kept as signals, never as ground truth. Full privacy, retention, and labelling rules for this surveillance imagery live in `training/REVIEW_PROCESS.md` in the repo.
